@@ -6,6 +6,7 @@ package net.ccmcomputing.discovery.udp;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -18,7 +19,14 @@ import java.util.List;
  */
 public class DiscoveryServer{
    public static void main(String[] args){
-      DiscoveryServer discoveryServer = new DiscoveryServer(42000, "example.service", Arrays.asList("Test Server", "hostname:localhost", "port:9090"));
+	   String hostname = "hostname:";
+       try{
+          String canonicalHostName = InetAddress.getLocalHost().getCanonicalHostName();
+          hostname += canonicalHostName;
+       }catch(UnknownHostException e){
+          e.printStackTrace();
+       }
+      DiscoveryServer discoveryServer = new DiscoveryServer(42000, "example.service", Arrays.asList("Test Server", hostname, "port:9090"));
       discoveryServer.startThread();
    }
 
