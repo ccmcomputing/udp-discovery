@@ -11,49 +11,36 @@ import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.Collections;
 import java.util.Enumeration;
-import java.util.concurrent.TimeUnit;
+
+import net.ccmcomputing.discovery.udp.DiscoveryPacket.PacketType;
 
 /**
  * @author Cole Markham
  * 
  */
-public class DiscoveryClient{
-   public static void main(String[] args) throws IOException, DiscoveryException{
-      final DiscoveryClient discoveryClient = new DiscoveryClient(42001, 42000);
-      Thread thread = new Thread(new Runnable(){
-         public void run(){
-            try{
-               Collection<DiscoveryPacket> discovered = discoveryClient.startListen(5, TimeUnit.SECONDS);
-               for(DiscoveryPacket packet: discovered){
-                  System.out.printf("%s : %s%n", packet.getIpAddress(), packet.getPayload().toString());
-               }
-            }catch(IOException e){
-               e.printStackTrace();
-            }
-         }
+public class DiscoveryClient {
+   public static void main(String[] args) throws IOException, DiscoveryException {
+      final DiscoveryClient discoveryClient = new DiscoveryClient(42001, 42000, packet -> {
+         System.out.printf("%s : %s%n", packet.getIpAddress(), packet.getPayload().toString());
       });
-      thread.start();
       discoveryClient.sendRequest("example.service");
    }
 
    DatagramSocket socket;
-   Collection<DiscoveryPacket> discoveredPackets;
    private byte[] buffer;
 
-   private int soTimeout;
    private int sendPort;
+   private ClientThread clientThread;
 
-   public DiscoveryClient(int listenPort, int sendPort) throws SocketException{
+   public DiscoveryClient(int listenPort, int sendPort, DiscoveryListener listener) throws SocketException {
       this.sendPort = sendPort;
       // sendAddress = new InetSocketAddress(InetAddress.getLocalHost(),
       // sendPort);
       socket = new DatagramSocket(listenPort);
-      discoveredPackets = new ArrayList<DiscoveryPacket>();
       buffer = new byte[1024];
+      startListenerThread(listener);
    }
 
    /**
@@ -61,37 +48,36 @@ public class DiscoveryClient{
     * returns the packet.
     * 
     * @return the packet that was recieved
-    * @throws SocketTimeoutException
-    *            if a timeout was specified and the socket timed out before a
-    *            packet was recieved
+    * @throws SocketTimeoutException if a timeout was specified and the socket
+    *                                timed out before a packet was recieved
     * 
     * @throws IOException
     * @throws DiscoveryException
     */
-   private DiscoveryPacket doListen() throws SocketTimeoutException, IOException, DiscoveryException{
+   private DiscoveryPacket receivePacket() throws SocketTimeoutException, IOException, DiscoveryException {
       DatagramPacket datagramPacket = new DatagramPacket(buffer, buffer.length);
       socket.receive(datagramPacket);
       DiscoveryPacket discoveryPacket = new DiscoveryPacket(datagramPacket);
-      discoveredPackets.add(discoveryPacket);
       return discoveryPacket;
    }
 
-   public void dispose(){
+   public void dispose() {
       socket.close();
+      clientThread.running = false;
    }
 
-   public void sendRequest(String serviceIdentifier) throws IOException, DiscoveryException{
-      DiscoveryPacket discoveryPacket = new DiscoveryPacket(Arrays.asList(DiscoveryPacket.REQUEST, serviceIdentifier));
+   public void sendRequest(String serviceIdentifier) throws IOException, DiscoveryException {
+      DiscoveryPacket discoveryPacket = new DiscoveryPacket(PacketType.REQUEST, serviceIdentifier, Collections.emptyList());
       Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-      while(interfaces.hasMoreElements()){
+      while (interfaces.hasMoreElements()) {
          NetworkInterface networkInterface = interfaces.nextElement();
          // Don't want to broadcast to the loopback interface
-         if(networkInterface.isLoopback()){
+         if (networkInterface.isLoopback()) {
             continue;
          }
-         for(InterfaceAddress interfaceAddress: networkInterface.getInterfaceAddresses()){
+         for (InterfaceAddress interfaceAddress : networkInterface.getInterfaceAddresses()) {
             InetAddress broadcast = interfaceAddress.getBroadcast();
-            if(broadcast == null){
+            if (broadcast == null) {
                continue;
             }
             // Use the address
@@ -102,70 +88,33 @@ public class DiscoveryClient{
 
    }
 
-   public void setSoTimeout(int soTimeout){
-      this.soTimeout = soTimeout;
+   private void startListenerThread(DiscoveryListener listener) {
+      clientThread = new ClientThread(listener);
+      clientThread.start();
    }
 
-   /**
-    * Starts listening for discovery packets, waiting until
-    * <code>maxCount</code> packets have been recieved. If
-    * <code>setSoTimeout</code> was called with a non-zero value, then this
-    * method could return fewer packets if the timeout is encountered. Otherwise
-    * this method will block until <code>maxCount</code> packets have been
-    * received.
-    * 
-    * @param maxCount
-    *           the maximum number of packets to wait for
-    * @return the packets which were recieved
-    * @throws SocketTimeoutException
-    * @throws IOException
-    */
-   public Collection<DiscoveryPacket> startListen(int maxCount) throws IOException{
-      int count = 0;
-      while(count < maxCount){
-         try{
-            doListen();
-         }catch(SocketTimeoutException e){
-            // Timeout, just break the loop
-            break;
-         }catch(DiscoveryException e){
-            e.printStackTrace();
-            continue;
-         }
-         count++;
+   public class ClientThread extends Thread {
+      DiscoveryListener listener;
+      volatile boolean running = true;
+
+      public ClientThread(DiscoveryListener listener) {
+         this.listener = listener;
       }
-      return discoveredPackets;
+
+      @Override
+      public void run() {
+         try {
+            while (running) {
+               DiscoveryPacket packet = receivePacket();
+               listener.packetReceived(packet);
+            }
+
+         } catch (IOException | DiscoveryException e) {
+            System.err.println(e);
+         }
+         System.out.println("Discovery client stopped");
+      }
+
    }
 
-   /**
-    * Starts listening for discovery packets, waiting the minimum of the
-    * specified time or the value given to <code>setSoTimeout</code>.
-    * 
-    * @param timeout
-    * @param unit
-    * @return all packets which were recieved within the timeout
-    * @throws SocketTimeoutException
-    * @throws IOException
-    */
-   public Collection<DiscoveryPacket> startListen(long timeout, TimeUnit unit) throws IOException{
-      int timeoutMillis = (int)TimeUnit.MILLISECONDS.convert(timeout, unit);
-      if(soTimeout > 0){
-         socket.setSoTimeout(Math.min(soTimeout, timeoutMillis));
-      }else{
-         socket.setSoTimeout(timeoutMillis);
-      }
-      long now = System.currentTimeMillis();
-      long then = now + timeoutMillis;
-      while(System.currentTimeMillis() < then){
-         try{
-            doListen();
-         }catch(SocketTimeoutException e){
-            break;
-         }catch(DiscoveryException e){
-            e.printStackTrace();
-            continue;
-         }
-      }
-      return discoveredPackets;
-   }
 }
